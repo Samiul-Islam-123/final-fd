@@ -1,79 +1,95 @@
-import numpy as np
 import tensorflow as tf
+from tensorflow.keras import layers, models
+from tensorflow.keras.datasets import cifar10
+import numpy as np
 import threading
+import flwr as fl
+import os
 import sys
 import json
 
-# Helper functions
+# Global variables
+AGGREGATED_MODEL_PATH = "aggregated_model.keras"  # Path to save the aggregated model
+status_updates = []  # List to store simulation updates
+client_accuracies = {}  # Dictionary to store individual client accuracies
+
+
+# Function to log updates
 def log_update(message):
+    status_updates.append(message)
     print(message)
 
+
+# Load and preprocess the CIFAR-10 dataset
 def load_dataset():
-    # Load your dataset here. For example:
-    # - Replace with actual dataset loading logic
-    # - Split dataset into x_train, y_train, x_test, y_test
-    x_train, y_train, x_test, y_test = np.random.randn(1000, 784), np.random.randint(0, 2, 1000), np.random.randn(200, 784), np.random.randint(0, 2, 200)
+    log_update("Loading CIFAR-10 dataset...")
+    (x_train, y_train), (x_test, y_test) = cifar10.load_data()
+    x_train, x_test = x_train / 255.0, x_test / 255.0
+    log_update("Dataset loaded and normalized.")
     return x_train, y_train, x_test, y_test
 
-def split_dataset(x_train, y_train, num_clients):
-    # Split the dataset into num_clients parts
-    client_data = []
-    data_size = len(x_train) // num_clients
-    for i in range(num_clients):
-        start = i * data_size
-        end = (i + 1) * data_size if i != num_clients - 1 else len(x_train)
-        client_data.append((x_train[start:end], y_train[start:end]))
-    return client_data
 
+# Split the dataset into `n` clients
+def split_dataset(x_train, y_train, n):
+    log_update(f"Splitting dataset into {n} clients...")
+    split_size = len(x_train) // n
+    clients = []
+    for i in range(n):
+        start = i * split_size
+        end = start + split_size if i < n - 1 else len(x_train)
+        clients.append((x_train[start:end], y_train[start:end]))
+    log_update("Dataset split completed.")
+    return clients
+
+
+# Define a simple CNN model
 def create_model():
-    # Create a simple model for federated learning
-    model = tf.keras.Sequential([
-        tf.keras.layers.Dense(128, activation='relu', input_shape=(784,)),
-        tf.keras.layers.Dense(1, activation='sigmoid')
+    model = models.Sequential([
+        layers.Conv2D(32, (3, 3), activation="relu", input_shape=(32, 32, 3)),
+        layers.MaxPooling2D((2, 2)),
+        layers.Flatten(),
+        layers.Dense(64, activation="relu"),
+        layers.Dense(10, activation="softmax"),
     ])
-    model.compile(optimizer='adam', loss='binary_crossentropy', metrics=['accuracy'])
+    model.compile(optimizer="adam", loss="sparse_categorical_crossentropy", metrics=["accuracy"])
     return model
 
-def train_client(client_id, data, client_results):
+
+# Client training function
+def train_client(client_id, data, result):
     x_train, y_train = data
-    log_update(f"Client {client_id}: Training started.")
     model = create_model()
-    model.fit(x_train, y_train, epochs=5, batch_size=32, verbose=0)
+    log_update(f"Client {client_id}: Training started.")
     
-    accuracy = model.evaluate(x_train, y_train, verbose=0)[1]
-    client_results[client_id] = model.get_weights()
-    log_update(f"Client {client_id}: Training completed. Accuracy: {accuracy:.2f}")
-    client_accuracies[client_id] = accuracy
+    # Train the model
+    history = model.fit(x_train, y_train, epochs=5, batch_size=32, verbose=0)
+    
+    # Save training accuracy
+    training_accuracy = history.history["accuracy"][-1]
+    client_accuracies[client_id] = training_accuracy
+    log_update(f"Client {client_id}: Training completed. Accuracy: {training_accuracy:.2f}")
+    
+    # Save the model weights
+    result[client_id] = model.get_weights()
 
-# Federated Learning Aggregation Function
-def aggregate_weights(client_weights, client_data_sizes):
+
+# Aggregation function
+def aggregate_weights(client_weights):
     log_update("Aggregating models from clients...")
-    
-    # Initialize the weighted sum for each layer
-    weighted_sum = []
-    
-    # Ensure that we are aggregating layer by layer
-    for layer_weights in zip(*client_weights):  # Zips together the weights for each layer across clients
-        # Calculate the weighted sum for this layer
-        layer_weight_shape = layer_weights[0].shape  # Get the shape of the weights of the first client
-        layer_weight_sum = np.zeros(layer_weight_shape)  # Initialize an array of the same shape as the layer weights
-        
-        # Calculate weighted sum for this layer based on client data sizes
-        total_size = sum(client_data_sizes)  # Total dataset size
-        for client_id, weights in enumerate(layer_weights):
-            weight_size = client_data_sizes[client_id] / total_size  # Weight per client based on dataset size
-            layer_weight_sum += weight_size * weights
-        
-        weighted_sum.append(layer_weight_sum)
-    
+    new_weights = [np.mean([client[weight] for client in client_weights], axis=0) for weight in range(len(client_weights[0]))]
     log_update("Aggregation completed.")
-    return weighted_sum
+    return new_weights
 
+
+# Save the aggregated model
 def save_model(weights):
-    # Save aggregated model weights to a file (for later use)
-    with open("aggregated_model_weights.json", "w") as f:
-        json.dump(weights, f)
+    model = create_model()
+    model.set_weights(weights)
+    model.save(AGGREGATED_MODEL_PATH)
+    log_update(f"Aggregated model saved to {AGGREGATED_MODEL_PATH}")
 
+
+# Main simulation function
 def main():
     # Get the number of clients from the command line
     if len(sys.argv) != 2:
@@ -84,9 +100,6 @@ def main():
     # Load and split dataset
     x_train, y_train, x_test, y_test = load_dataset()
     clients = split_dataset(x_train, y_train, num_clients)
-    
-    # Calculate dataset sizes for each client
-    client_data_sizes = [len(client[0]) for client in clients]
 
     # Train clients in separate threads
     client_results = {}
@@ -102,13 +115,12 @@ def main():
 
     # Log client accuracies
     log_update("\nIndividual Client Accuracies:")
-    client_accuracies = {}
     for client_id, accuracy in client_accuracies.items():
         log_update(f"Client {client_id}: {accuracy:.2f}")
 
     # Aggregate client weights
     client_weights = list(client_results.values())
-    aggregated_weights = aggregate_weights(client_weights, client_data_sizes)
+    aggregated_weights = aggregate_weights(client_weights)
 
     # Save the aggregated model
     save_model(aggregated_weights)
@@ -120,10 +132,6 @@ def main():
     log_update(f"\nAggregated Model Accuracy: {accuracy * 100:.2f}%")
 
     # Save status updates to a JSON file (for the frontend)
-    status_updates = {
-        "training_status": "Completed",
-        "aggregated_accuracy": accuracy
-    }
     with open("status_updates.json", "w") as f:
         json.dump(status_updates, f)
 
