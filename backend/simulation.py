@@ -42,17 +42,31 @@ def split_dataset(x_train, y_train, n):
     return clients
 
 
-# Define a simple CNN model
+# Define an improved CNN model with more complexity
 def create_model():
     model = models.Sequential([
         layers.Conv2D(32, (3, 3), activation="relu", input_shape=(32, 32, 3)),
         layers.MaxPooling2D((2, 2)),
+        layers.Conv2D(64, (3, 3), activation="relu"),
+        layers.MaxPooling2D((2, 2)),
+        layers.Conv2D(128, (3, 3), activation="relu"),
         layers.Flatten(),
-        layers.Dense(64, activation="relu"),
+        layers.Dense(128, activation="relu"),
         layers.Dense(10, activation="softmax"),
     ])
-    model.compile(optimizer="adam", loss="sparse_categorical_crossentropy", metrics=["accuracy"])
+    model.compile(optimizer=tf.keras.optimizers.Adam(learning_rate=0.001), 
+                  loss="sparse_categorical_crossentropy", metrics=["accuracy"])
     return model
+
+
+# Data augmentation function
+def data_augmentation(x_train):
+    data_augmentation = tf.keras.Sequential([
+        layers.RandomFlip("horizontal"),
+        layers.RandomRotation(0.2),
+        layers.RandomZoom(0.2),
+    ])
+    return data_augmentation(x_train)
 
 
 # Client training function
@@ -60,9 +74,12 @@ def train_client(client_id, data, result):
     x_train, y_train = data
     model = create_model()
     log_update(f"Client {client_id}: Training started.")
+
+    # Apply data augmentation
+    x_train = data_augmentation(x_train)
     
     # Train the model
-    history = model.fit(x_train, y_train, epochs=5, batch_size=32, verbose=0)
+    history = model.fit(x_train, y_train, epochs=10, batch_size=32, verbose=0)
     
     # Save training accuracy
     training_accuracy = history.history["accuracy"][-1]
@@ -73,12 +90,18 @@ def train_client(client_id, data, result):
     result[client_id] = model.get_weights()
 
 
-# Aggregation function
-def aggregate_weights(client_weights):
+# Aggregation function with weighted averaging based on client dataset sizes
+def aggregate_weights(client_weights, client_data_sizes):
     log_update("Aggregating models from clients...")
-    new_weights = [np.mean([client[weight] for client in client_weights], axis=0) for weight in range(len(client_weights[0]))]
+    weighted_sum = np.zeros_like(client_weights[0])
+    total_data_points = sum(client_data_sizes)
+    
+    for i, weight in enumerate(client_weights):
+        weight_factor = client_data_sizes[i] / total_data_points
+        weighted_sum += weight_factor * weight
+    
     log_update("Aggregation completed.")
-    return new_weights
+    return weighted_sum
 
 
 # Save the aggregated model
@@ -101,6 +124,9 @@ def main():
     x_train, y_train, x_test, y_test = load_dataset()
     clients = split_dataset(x_train, y_train, num_clients)
 
+    # Track the data sizes of each client
+    client_data_sizes = [len(client[0]) for client in clients]
+
     # Train clients in separate threads
     client_results = {}
     threads = []
@@ -118,9 +144,9 @@ def main():
     for client_id, accuracy in client_accuracies.items():
         log_update(f"Client {client_id}: {accuracy:.2f}")
 
-    # Aggregate client weights
+    # Aggregate client weights using client data size as weights
     client_weights = list(client_results.values())
-    aggregated_weights = aggregate_weights(client_weights)
+    aggregated_weights = aggregate_weights(client_weights, client_data_sizes)
 
     # Save the aggregated model
     save_model(aggregated_weights)
