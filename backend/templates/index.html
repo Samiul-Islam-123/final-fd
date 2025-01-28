@@ -1,0 +1,41 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Federated Learning Simulation</title>
+    <script src="https://cdn.socket.io/4.0.0/socket.io.min.js"></script>
+    <style>
+        body { font-family: Arial, sans-serif; margin: 20px; }
+        #status { margin-top: 20px; }
+    </style>
+</head>
+<body>
+
+    <h1>Federated Learning Simulation</h1>
+    <button id="startButton">Start Simulation</button>
+
+    <div id="status">
+        <h2>Status Updates</h2>
+        <ul id="statusList"></ul>
+    </div>
+
+    <script>
+        const socket = io.connect('http://127.0.0.1:5000');  // Connect to backend
+
+        // Handle real-time status updates
+        socket.on('status_update', function (message) {
+            const statusList = document.getElementById('statusList');
+            const listItem = document.createElement('li');
+            listItem.textContent = message;
+            statusList.appendChild(listItem);
+        });
+
+        // Start the simulation when button is clicked
+        document.getElementById('startButton').addEventListener('click', () => {
+            socket.emit('start_simulation', {});  // Send start signal to the backend
+        });
+    </script>
+
+</body>
+</html>
